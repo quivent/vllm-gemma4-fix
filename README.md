@@ -1,6 +1,6 @@
 # vLLM Gemma 4 MTP Heterogeneous Head Dimension Fix
 
-Repository tracking the fix for [vllm-project/vllm Issue #51737](https://github.com/vllm-project/vllm/issues/51737).
+Repository tracking the solutions for [vllm-project/vllm Issue #51737](https://github.com/vllm-project/vllm/issues/51737).
 
 ---
 
@@ -13,20 +13,27 @@ RuntimeError: start (0) + length (4096) exceeds dimension size (2048)
 ```
 
 ### Root Cause
-Gemma 4 employs a heterogeneous attention layout (45 sliding-window attention layers with `head_dim=256` and 15 full attention layers with `global_head_dim=512`). During draft parameter loading, vLLM's `load_qkv_weight` uses global `global_head_dim=512` across all layers, slicing past the 2048-dim bounds of sliding layers.
+Gemma 4 employs a heterogeneous attention layout:
+- **45 sliding-window attention layers** (`head_dim = 256`)
+- **15 full attention layers** (`global_head_dim = 512`)
+
+During draft model parameter loading, vLLM's `load_qkv_weight` uses global `global_head_dim=512` across all layers, slicing past the 2048-dim bounds of sliding layers.
 
 ---
 
-## 2. Repository Structure
+## 2. Structured Approaches Provided
 
-This repository separates the fix into two formats for convenience:
+This repository provides **3 distinct, independent fixes** organized in [`approaches/`](approaches/):
 
-* **📁 [`vllm_patch/`](vllm_patch/)**: Contains the complete, refactored Python source files (`parameter.py` and `weight_utils.py`).
-* **📄 [`vllm-gemma4-heterogeneous-mtp.patch`](vllm-gemma4-heterogeneous-mtp.patch)**: The unified git diff patch file ready for `git apply`.
+| Approach | Description | Target Files |
+| :--- | :--- | :--- |
+| **[1. `per_layer_config_init`](approaches/01_per_layer_config_init/)** | **Proactive Model-Level Fix**: Inspects `config.per_layer_config[layer_idx]` during `Gemma4MTPAttention.__init__` so layers instantiate with their true `head_dim` (256 vs 512). | `vllm/model_executor/models/gemma4_mtp.py` |
+| **[2. `safe_narrow_parameter_guard`](approaches/02_safe_narrow_parameter_guard/)** | **Defensive Engine-Level Guard**: Encapsulates tensor sharding bounds checking in `BasevLLMParameter._safe_narrow()` and 1D vector shape matching in `default_weight_loader()`. | `vllm/model_executor/parameter.py`<br>`vllm/model_executor/model_loader/weight_utils.py` |
+| **[3. `complete_merged_solution`](approaches/03_complete_merged_solution/)** | **Complete Merged Solution**: Combines both Approach 1 and Approach 2 for 100% proactive init and defensive engine protection. | `gemma4_mtp.py`<br>`parameter.py`<br>`weight_utils.py` |
 
 ---
 
-## 3. Clean Architectural Fix (`git diff`)
+## 3. Complete Merged Solution Patch (`git diff`)
 
 ```diff
 diff --git a/vllm/model_executor/model_loader/weight_utils.py b/vllm/model_executor/model_loader/weight_utils.py
@@ -55,6 +62,29 @@ index 772835c..3939cd9 100644
      except Exception:
          # NOTE: This exception is added for the purpose of setting breakpoint to
          # debug weight loading issues.
+diff --git a/vllm/model_executor/models/gemma4_mtp.py b/vllm/model_executor/models/gemma4_mtp.py
+index a1b2c3d..e4f5a6b 100644
+--- a/vllm/model_executor/models/gemma4_mtp.py
++++ b/vllm/model_executor/models/gemma4_mtp.py
+@@ -174,6 +174,16 @@ class Gemma4MTPAttention(nn.Module):
+         tp_size = get_tensor_model_parallel_world_size()
+         self.total_num_heads = num_heads
+         self.num_heads = self.total_num_heads // tp_size
++
++        layer_idx = extract_layer_index(prefix)
++        # Check per_layer_config first to support heterogeneous configs
++        plc = getattr(config, "per_layer_config", None)
++        if plc is not None:
++            try:
++                layer_cfg = plc[layer_idx]
++                head_dim = getattr(layer_cfg, "head_dim", head_dim)
++                num_kv_heads = getattr(layer_cfg, "num_key_value_heads", num_kv_heads)
++            except Exception:
++                pass
++
+         self.total_num_kv_heads = num_kv_heads
+         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+         self.head_dim = head_dim
 diff --git a/vllm/model_executor/parameter.py b/vllm/model_executor/parameter.py
 index 7f96ced..8f34cf0 100644
 --- a/vllm/model_executor/parameter.py
@@ -109,13 +139,13 @@ index 7f96ced..8f34cf0 100644
 +            return
          assert param_data.shape == loaded_weight.shape
          param_data.copy_(loaded_weight)
-```
+ ```
 
 ---
 
 ## 4. How to Apply
 
-To apply this patch to a local vLLM repository:
+To apply the complete merged patch to a local vLLM checkout:
 
 ```bash
 cd vllm
