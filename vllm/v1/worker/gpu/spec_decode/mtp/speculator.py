@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import torch
 import torch.nn as nn
 
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
@@ -29,16 +30,27 @@ class MTPSpeculator(AutoRegressiveSpeculator):
         # steps 1+ reuse them.
         self.share_mtp_topk_indices = (
             getattr(draft_hf_config, "index_share_for_mtp_iteration", False)
-            and hasattr(draft_model.model, "set_skip_topk")
+            and (
+                hasattr(draft_model.model, "set_skip_topk_tensor")
+                or hasattr(draft_model.model, "set_skip_topk")
+            )
             and hasattr(draft_model.model, "compact_topk_indices")
         )
         return draft_model
+
+    def _set_skip_topk(self, skip: bool) -> None:
+        model = self.model.model
+        if hasattr(model, "set_skip_topk_tensor"):
+            flag_tensor = torch.tensor([skip], device=self.device)
+            model.set_skip_topk_tensor(flag_tensor)
+        elif hasattr(model, "set_skip_topk"):
+            model.set_skip_topk(skip)
 
     def on_prefill_begin(self, num_reqs: int) -> None:
         # Step 0 computes its own top-k. Unconditional, so a step that died
         # midway cannot leave reuse mode on.
         if self.share_mtp_topk_indices:
-            self.model.model.set_skip_topk(False)
+            self._set_skip_topk(False)
 
     def on_prefill_end(self, num_reqs: int) -> None:
         # Step 0 (prefill) wrote topk indices for every query token in the
@@ -51,8 +63,8 @@ class MTPSpeculator(AutoRegressiveSpeculator):
         # Switch to reuse mode so draft steps 1+ skip the indexer op and read
         # the indices that step 0 wrote into the shared buffer.
         if self.share_mtp_topk_indices:
-            self.model.model.set_skip_topk(True)
+            self._set_skip_topk(True)
 
     def on_multi_step_decode_end(self, num_reqs: int) -> None:
         if self.share_mtp_topk_indices:
-            self.model.model.set_skip_topk(False)
+            self._set_skip_topk(False)
