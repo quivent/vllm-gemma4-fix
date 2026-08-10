@@ -25,46 +25,57 @@ index 772835c..3939cd9 100644
          # NOTE: This exception is added for the purpose of setting breakpoint to
          # debug weight loading issues.
 diff --git a/vllm/model_executor/parameter.py b/vllm/model_executor/parameter.py
-index 7f96ced..9fe4bca 100644
+index 7f96ced..8f34cf0 100644
 --- a/vllm/model_executor/parameter.py
 +++ b/vllm/model_executor/parameter.py
-@@ -168,9 +168,17 @@ class _ColumnvLLMParameter(BasevLLMParameter):
+@@ -108,6 +108,16 @@ class BasevLLMParameter(Parameter):
+     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
+         self._assert_and_load(loaded_weight)
+ 
++    @staticmethod
++    def _safe_narrow(
++        tensor: torch.Tensor, dim: int, start: int, length: int
++    ) -> torch.Tensor:
++        """Narrow tensor safely within valid bounds for heterogeneous layer shapes."""
++        max_size = tensor.shape[dim]
++        start = min(0 if start < 0 else start, max_size)
++        length = min(0 if length < 0 else length, max_size - start)
++        return tensor.narrow(dim, start, length)
++
+     def _shard_id_as_int(self, shard_id: str | int) -> int:
+         if isinstance(shard_id, int):
+             return shard_id
+@@ -167,11 +177,11 @@ class _ColumnvLLMParameter(BasevLLMParameter):
+             )
  
          param_data = self.data
- 
-+        orig_shard_size = shard_size
-+        max_param = param_data.shape[self.output_dim]
-+        max_loaded = loaded_weight.shape[self.output_dim]
-+        shard_offset = min(shard_offset, max_param)
-+        shard_size = min(shard_size, max_param - shard_offset)
-+        loaded_start = min(self.tp_rank * orig_shard_size, max_loaded)
-+        shard_size = min(shard_size, max_loaded - loaded_start)
-+        if shard_size <= 0:
-+            return
-         param_data = param_data.narrow(self.output_dim, shard_offset, shard_size)
-         loaded_weight = loaded_weight.narrow(
+-
+-        param_data = param_data.narrow(self.output_dim, shard_offset, shard_size)
+-        loaded_weight = loaded_weight.narrow(
 -            self.output_dim, self.tp_rank * shard_size, shard_size
-+            self.output_dim, loaded_start, shard_size
-         )
+-        )
++        loaded_start = self.tp_rank * shard_size
++        param_data = self._safe_narrow(param_data, self.output_dim, shard_offset, shard_size)
++        loaded_weight = self._safe_narrow(loaded_weight, self.output_dim, loaded_start, shard_size)
++        if param_data.numel() == 0 or loaded_weight.numel() == 0:
++            return
          assert param_data.shape == loaded_weight.shape
          param_data.copy_(loaded_weight)
-@@ -192,9 +200,17 @@ class _ColumnvLLMParameter(BasevLLMParameter):
+ 
+@@ -192,11 +202,11 @@ class _ColumnvLLMParameter(BasevLLMParameter):
  
          param_data = self.data
          shard_id_int = self.tp_rank if shard_id == "q" else self.tp_rank // num_heads
-+        orig_shard_size = shard_size
-+        max_param = param_data.shape[self.output_dim]
-+        max_loaded = loaded_weight.shape[self.output_dim]
-+        shard_offset = min(shard_offset, max_param)
-+        shard_size = min(shard_size, max_param - shard_offset)
-+        loaded_start = min(shard_id_int * orig_shard_size, max_loaded)
-+        shard_size = min(shard_size, max_loaded - loaded_start)
-+        if shard_size <= 0:
-+            return
-         param_data = param_data.narrow(self.output_dim, shard_offset, shard_size)
-         loaded_weight = loaded_weight.narrow(
+-        param_data = param_data.narrow(self.output_dim, shard_offset, shard_size)
+-        loaded_weight = loaded_weight.narrow(
 -            self.output_dim, shard_id_int * shard_size, shard_size
-+            self.output_dim, loaded_start, shard_size
-         )
- 
+-        )
+-
++        loaded_start = shard_id_int * shard_size
++        param_data = self._safe_narrow(param_data, self.output_dim, shard_offset, shard_size)
++        loaded_weight = self._safe_narrow(loaded_weight, self.output_dim, loaded_start, shard_size)
++        if param_data.numel() == 0 or loaded_weight.numel() == 0:
++            return
          assert param_data.shape == loaded_weight.shape
+         param_data.copy_(loaded_weight)
+ 
