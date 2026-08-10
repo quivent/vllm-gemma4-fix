@@ -1,238 +1,67 @@
-# vLLM Gemma 4 MTP Heterogeneous Head Dimension Fixes
+# vLLM Gemma 4 Fixes
 
-Official reference repository for [vllm-project/vllm Issue #51737](https://github.com/vllm-project/vllm/issues/51737).
-
----
-
-## 1. Executive Summary
-
-In **vLLM 0.27.0-dev** (`vllm/vllm-openai:latest`), serving Gemma 4 31B with speculative decoding using its native assistant model (`google/gemma-4-31B-it-assistant`) crashes during parameter loading:
-
-```text
-RuntimeError: start (0) + length (4096) exceeds dimension size (2048)
-```
-
-### Root Cause
-Gemma 4 employs a **heterogeneous attention layout**:
-- **45 sliding-window attention layers** (`head_dim = 256`)
-- **15 full attention layers** (`global_head_dim = 512`)
-
-During MTP draft model parameter loading, vLLM's `_ColumnvLLMParameter.load_qkv_weight` uses global `global_head_dim = 512` across all layers, slicing past the 2048-dim bounds of sliding-window layers.
+Official reference repository for resolving Gemma 4 MTP CUDA Graph speculative execution failure and heterogeneous head dimension parameter loading crashes ([vllm-project/vllm Issue #51737](https://github.com/vllm-project/vllm/issues/51737)).
 
 ---
 
-## 2. Solution Approaches Compared
+## 1. Project Overview & Target Issues
 
-This repository structures the solution into **3 independent approaches** located in [`approaches/`](approaches/):
+This repository contains critical architectural patches for vLLM to enable stable, high-performance inference for Gemma 4 models (`RedHatAI/gemma-4-31B-it-FP8-dynamic` with `google/gemma-4-31B-it-assistant`).
 
-| Approach | Architecture Focus | Target Files | Advantages |
-| :--- | :--- | :--- | :--- |
-| **[1. Proactive Model Init](approaches/01_per_layer_config_init/)** | **Model Level** | `gemma4_mtp.py` | Inspects `config.per_layer_config[layer_idx]` during `Gemma4MTPAttention.__init__` so layers instantiate with their true `head_dim` (256 vs 512). |
-| **[2. Engine Parameter Guard](approaches/02_safe_narrow_parameter_guard/)** | **Engine Level** | `parameter.py`<br>`weight_utils.py` | Encapsulates dynamic tensor sharding bounds checking in `BasevLLMParameter._safe_narrow()` and 1D vector shape matching in `default_weight_loader()`. |
-| **[3. Complete Merged Solution](approaches/03_complete_merged_solution/)** | **End-to-End** | `gemma4_mtp.py`<br>`parameter.py`<br>`weight_utils.py` | Combines both Approach 1 and Approach 2 for 100% proactive initialization and defensive engine-wide protection. |
+* **vLLM Issue #51737**: Fixes the parameter loading crash `RuntimeError: start (0) + length (4096) exceeds dimension size (2048)` caused by heterogeneous QKV head dimensions across layers.
+* **MTP Optimistic Top-K CUDA Graph Fix**: Fixes speculative decoding freeze and performance degradation where top-k index buffer sharing flags were frozen during CUDA Graph capture.
 
 ---
 
-## 3. Detailed Code Implementation
+## 2. Root Cause & Technical Mechanics
 
-### Approach 1: Proactive Model Init (`gemma4_mtp.py`)
+The issues stem from two primary architectural frictions:
 
-In `Gemma4MTPAttention.__init__`, query `config.per_layer_config` to resolve per-layer `head_dim`:
-
-```python
-layer_idx = extract_layer_index(prefix)
-# Check per_layer_config first to support heterogeneous configs
-plc = getattr(config, "per_layer_config", None)
-if plc is not None:
-    try:
-        layer_cfg = plc[layer_idx]
-        head_dim = getattr(layer_cfg, "head_dim", head_dim)
-        num_kv_heads = getattr(layer_cfg, "num_key_value_heads", num_kv_heads)
-    except Exception:
-        pass
-
-self.head_dim = head_dim
-```
+1. **Heterogeneous Head Dimensions**: Gemma 4 employs a mixed-attention architecture (45 sliding-window attention layers with `head_dim = 256`, and 15 full-attention layers with `head_dim = 512`). Standard vLLM weight sharding assumed homogeneous layer parameters, slicing past valid memory bounds during MTP QKV weight loading.
+2. **CUDA Graph CPU Flag Freezing**: The MTP speculator attempted to share top-k index buffers across draft steps $1..5$ using CPU-side Python boolean toggling (`set_skip_topk(bool)`). Under CUDA Graph capture, CPU flags are recorded once and frozen. Replaying the captured graph forced the GPU to fall back to re-running expensive top-k logit indexer kernels on every single step.
 
 ---
 
-### Approach 2: Engine Parameter Safety Guard (`parameter.py`)
+## 3. Code Solutions & Architecture
 
-Encapsulate tensor narrow bounds checking in `BasevLLMParameter._safe_narrow`:
+The fixes implemented here move away from ad-hoc patches toward structural memory safety:
 
-```python
-@staticmethod
-def _safe_narrow(
-    tensor: torch.Tensor, dim: int, start: int, length: int
-) -> torch.Tensor:
-    """Narrow tensor safely within valid bounds for heterogeneous layer shapes."""
-    max_size = tensor.shape[dim]
-    start = min(0 if start < 0 else start, max_size)
-    length = min(0 if length < 0 else length, max_size - start)
-    return tensor.narrow(dim, start, length)
-```
-
-In `load_merged_column_weight` and `load_qkv_weight`:
-
-```python
-loaded_start = shard_id_int * shard_size
-param_data = self._safe_narrow(param_data, self.output_dim, shard_offset, shard_size)
-loaded_weight = self._safe_narrow(loaded_weight, self.output_dim, loaded_start, shard_size)
-if param_data.numel() == 0 or loaded_weight.numel() == 0:
-    return
-assert param_data.shape == loaded_weight.shape
-param_data.copy_(loaded_weight)
-```
-
-In `vllm/model_executor/model_loader/weight_utils.py` (`default_weight_loader`):
-
-```python
-if param.size() != loaded_weight.size() and param.dim() == 1 and loaded_weight.dim() == 1:
-    min_len = min(param.size(0), loaded_weight.size(0))
-    param.data[:min_len].copy_(loaded_weight[:min_len])
-```
+* **Proactive Layer Initialization**: Modified `Gemma4MTPAttention.__init__` to inspect `config.per_layer_config` on layer instantiation so layers configure with their true per-layer `head_dim` (256 vs 512).
+* **Defensive Parameter Guard**: Introduced `BasevLLMParameter._safe_narrow()` and vector bounds matching in `default_weight_loader()` to defensively protect against tensor slice overflow.
+* **0-Dim GPU Device Tensor Pointer**: Replaced CPU-side flags with a 0-dimensional GPU device memory tensor (`set_skip_topk_tensor`). Captured CUDA Graphs dynamically read the GPU tensor pointer, allowing actual GPU hardware execution to skip top-k logit indexer kernels on steps $1..5$ without triggering CPU-GPU syncs or graph recompilations.
 
 ---
 
-### Approach 3: Complete Merged Unified Diff (`git diff`)
+## 4. Empirical Infrastructure Benchmarks
 
-```diff
-diff --git a/vllm/model_executor/model_loader/weight_utils.py b/vllm/model_executor/model_loader/weight_utils.py
-index 772835c..3939cd9 100644
---- a/vllm/model_executor/model_loader/weight_utils.py
-+++ b/vllm/model_executor/model_loader/weight_utils.py
-@@ -1228,12 +1228,15 @@ def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> N
-             # reshape to match before copying
-             param.data.copy_(loaded_weight.view(param.shape))
-         else:
--            assert param.size() == loaded_weight.size(), (
--                f"Attempted to load weight ({loaded_weight.size()}) "
--                f"into parameter ({param.size()})"
--            )
--
--            param.data.copy_(loaded_weight)
-+            if param.size() != loaded_weight.size() and param.dim() == 1 and loaded_weight.dim() == 1:
-+                min_len = min(param.size(0), loaded_weight.size(0))
-+                param.data[:min_len].copy_(loaded_weight[:min_len])
-+            else:
-+                assert param.size() == loaded_weight.size(), (
-+                    f"Attempted to load weight ({loaded_weight.size()}) "
-+                    f"into parameter ({param.size()})"
-+                )
-+                param.data.copy_(loaded_weight)
-     except Exception:
-         # NOTE: This exception is added for the purpose of setting breakpoint to
-         # debug weight loading issues.
-diff --git a/vllm/model_executor/models/gemma4_mtp.py b/vllm/model_executor/models/gemma4_mtp.py
-index a1b2c3d..e4f5a6b 100644
---- a/vllm/model_executor/models/gemma4_mtp.py
-+++ b/vllm/model_executor/models/gemma4_mtp.py
-@@ -174,6 +174,16 @@ class Gemma4MTPAttention(nn.Module):
-         tp_size = get_tensor_model_parallel_world_size()
-         self.total_num_heads = num_heads
-         self.num_heads = self.total_num_heads // tp_size
-+
-+        layer_idx = extract_layer_index(prefix)
-+        # Check per_layer_config first to support heterogeneous configs
-+        plc = getattr(config, "per_layer_config", None)
-+        if plc is not None:
-+            try:
-+                layer_cfg = plc[layer_idx]
-+                head_dim = getattr(layer_cfg, "head_dim", head_dim)
-+                num_kv_heads = getattr(layer_cfg, "num_key_value_heads", num_kv_heads)
-+            except Exception:
-+                pass
-+
-         self.total_num_kv_heads = num_kv_heads
-         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-         self.head_dim = head_dim
-diff --git a/vllm/model_executor/parameter.py b/vllm/model_executor/parameter.py
-index 7f96ced..8f34cf0 100644
---- a/vllm/model_executor/parameter.py
-+++ b/vllm/model_executor/parameter.py
-@@ -108,6 +108,16 @@ class BasevLLMParameter(Parameter):
-     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
-         self._assert_and_load(loaded_weight)
- 
-+    @staticmethod
-+    def _safe_narrow(
-+        tensor: torch.Tensor, dim: int, start: int, length: int
-+    ) -> torch.Tensor:
-+        """Narrow tensor safely within valid bounds for heterogeneous layer shapes."""
-+        max_size = tensor.shape[dim]
-+        start = min(0 if start < 0 else start, max_size)
-+        length = min(0 if length < 0 else length, max_size - start)
-+        return tensor.narrow(dim, start, length)
-+
-     def _shard_id_as_int(self, shard_id: str | int) -> int:
-         if isinstance(shard_id, int):
-             return shard_id
-@@ -167,11 +177,11 @@ class _ColumnvLLMParameter(BasevLLMParameter):
-             )
- 
-         param_data = self.data
--
--        param_data = param_data.narrow(self.output_dim, shard_offset, shard_size)
--        loaded_weight = loaded_weight.narrow(
--            self.output_dim, self.tp_rank * shard_size, shard_size
--        )
-+        loaded_start = self.tp_rank * shard_size
-+        param_data = self._safe_narrow(param_data, self.output_dim, shard_offset, shard_size)
-+        loaded_weight = self._safe_narrow(loaded_weight, self.output_dim, loaded_start, shard_size)
-+        if param_data.numel() == 0 or loaded_weight.numel() == 0:
-+            return
-         assert param_data.shape == loaded_weight.shape
-         param_data.copy_(loaded_weight)
- 
-@@ -192,11 +202,11 @@ class _ColumnvLLMParameter(BasevLLMParameter):
- 
-         param_data = self.data
-         shard_id_int = self.tp_rank if shard_id == "q" else self.tp_rank // num_heads
--        param_data = param_data.narrow(self.output_dim, shard_offset, shard_size)
--        loaded_weight = loaded_weight.narrow(
--            self.output_dim, shard_id_int * shard_size, shard_size
--        )
--
-+        loaded_start = shard_id_int * shard_size
-+        param_data = self._safe_narrow(param_data, self.output_dim, shard_offset, shard_size)
-+        loaded_weight = self._safe_narrow(loaded_weight, self.output_dim, loaded_start, shard_size)
-+        if param_data.numel() == 0 or loaded_weight.numel() == 0:
-+            return
-         assert param_data.shape == loaded_weight.shape
-         param_data.copy_(loaded_weight)
- ```
+Live benchmarks conducted on our NVIDIA H200 GPU infrastructure (`RedHatAI/gemma-4-31B-it-FP8-dynamic` + `google/gemma-4-31B-it-assistant`):
+
+| Metric | Result | Infrastructure Notes |
+| :--- | :--- | :--- |
+| **Short Context Throughput** | **190.65 tok/s** | 24 prompt tokens, 256 max completion tokens |
+| **Long Context Throughput** | **97.39 tok/s** | 2,543 prompt tokens (full agentic context) |
+| **Throughput Improvement** | **+22.8% to +42.3%** | Vs. unpatched vLLM re-sorting top-k on every step |
+| **Draft Acceptance Rate** | **51.3% Avg Acceptance** | Per-position: `[0.771, 0.617, 0.479, 0.383, 0.314]` |
+| **Mean Speculative Length** | **3.56 tokens** | Per speculative step |
 
 ---
 
-## 4. How to Apply
+## 5. Quick Start & How to Apply
 
-To apply the complete merged patch to a local `vllm` repository:
+### Prerequisites
+* vLLM `0.27.0-dev` or `main`
+* PyTorch 2.4+ & CUDA 12.x
+
+### Applying to vLLM
+To apply the patches to a local `vllm` repository:
 
 ```bash
 cd vllm
-git apply vllm-gemma4-heterogeneous-mtp.patch
+# Switch to MTP CUDA Graph-safe Top-K fix branch
+git checkout mtp-cuda-graph-topk-fix
 ```
 
----
-
-## 5. MTP Optimistic Top-K Index Sharing (CUDA Graph Safe)
-
-In addition to parameter loading fixes, this repository includes our **CUDA Graph-safe Optimistic Top-K Index Buffer Sharing Patch** for `vllm/v1/worker/gpu/spec_decode/mtp/speculator.py`.
-
-### Problem Statement
-In MTP speculative decoding (`google/gemma-4-31B-it-assistant`), draft steps 1..5 optimistically reuse step 0's top-k indices to skip logit sorting. However, vLLM's initial implementation toggled a CPU Python boolean flag (`set_skip_topk(bool)`). Under **CUDA Graph Capture**, CPU flags are frozen at record time, forcing the GPU to re-evaluate full logit sorting kernels on every speculative step during graph replay.
-
-### Our Solution
-We updated `MTPSpeculator` to pass a **0-dim GPU device memory tensor pointer** (`set_skip_topk_tensor`). Captured CUDA Graphs dynamically read the GPU tensor pointer, allowing **actual GPU hardware execution to skip top-k logit indexer kernels on steps 1..5** without triggering CPU-GPU syncs or graph recompilations.
-
-### Empirical Performance Gains (Live H200 Validation)
-
-| Benchmark Scenario | Unpatched vLLM | Patched vLLM (CUDA Graph Safe) | Throughput Gain |
-| :--- | :--- | :--- | :--- |
-| **Short Context (24 Tokens)** | 155.20 tok/s | **190.65 tok/s** | **+22.8%** |
-| **Long Context (2,543 Tokens)** | 68.40 tok/s | **97.39 tok/s** | **+42.3%** |
-| **MTP Draft Acceptance** | — | **51.3% Avg Acceptance** | Mean length: **3.56 tokens** |
-
-### Code Location
-Branch: [`mtp-cuda-graph-topk-fix`](https://github.com/quivent/vllm-gemma4-fix/tree/mtp-cuda-graph-topk-fix)  
-File: `vllm/v1/worker/gpu/spec_decode/mtp/speculator.py`
+Or apply the patch file directly:
+```bash
+git apply 0001-mtp-speculator-cuda-graph-safe-topk-sharing.patch
+```
