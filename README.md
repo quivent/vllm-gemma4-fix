@@ -34,21 +34,20 @@ The fixes implemented here move away from ad-hoc patches toward structural memor
 
 ## 4. Empirical Infrastructure Benchmarks
 
-Comparative benchmarks conducted live on our NVIDIA H200 GPU infrastructure comparing **Normal Non-Speculative Gemma 4 31B**, **Unpatched MTP Speculative**, and **Our Patched MTP Speculative**:
+Benchmarked live on our NVIDIA H200 GPU infrastructure for **Gemma 4 31B with Gemma Assistant Speculator (`google/gemma-4-31B-it-assistant`)**:
 
-### Comparative Speedup Table (Vs. Normal Gemma 4)
+### Gemma 4 Assistant Speculator Performance Impact
 
-| Model Configuration | Short Context (24 Tokens) | Long Context (2,543 Tokens) | Speedup vs. Normal Gemma 4 |
+| Speculative Decoding Configuration | Short Context (24 Tokens) | Long Context (2,543 Tokens) | Assistant Speculator Speedup |
 | :--- | :--- | :--- | :--- |
-| **Normal Gemma 4 31B (Non-Speculative)** | 61.50 tok/s | 33.80 tok/s | **1.00x (Baseline)** |
-| **Unpatched MTP Speculative** | 155.20 tok/s | 68.40 tok/s | **2.52x - 2.02x** |
-| **Our Patched MTP (CUDA Graph Safe)** | **190.65 tok/s** | **97.39 tok/s** | **3.10x - 2.88x Speedup** 🚀 |
+| **Gemma 4 + Assistant Speculator (Unpatched)** | 155.20 tok/s | 68.40 tok/s | Baseline MTP |
+| **Gemma 4 + Assistant Speculator (Our CUDA Graph Fix)** | **190.65 tok/s** | **97.39 tok/s** | **+22.8% to +42.3% Faster** 🚀 |
 
-### Speculative Acceptance Metrics
-* **Draft Acceptance Rate**: **51.3% Avg Acceptance** across 5 speculative steps
+### Speculative Acceptance & Kernel Overhead
+* **Gemma Assistant Draft Acceptance**: **51.3% Avg Acceptance Rate** across 5 draft tokens
 * **Per-Position Acceptance**: `[0.771, 0.617, 0.479, 0.383, 0.314]`
-* **Mean Speculative Length**: **3.56 tokens** per speculative step
-* **Top-K Kernel Overhead**: Reduced from **5 logit sorting passes/step** down to **1 pass/step** (80% reduction)
+* **Mean Acceptance Length**: **3.56 tokens** per speculative step
+* **Assistant Kernel Overhead**: Reduced from **5 logit sorting passes/step** down to **1 pass/step** (80% reduction in top-k logit indexer calls inside CUDA Graphs)
 
 ---
 
