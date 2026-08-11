@@ -1,8 +1,26 @@
-# vLLM Gemma 4 Fixes
+# vllm-gemma4-fix
 
-Official reference repository for resolving Gemma 4 MTP CUDA Graph speculative execution failure and heterogeneous head dimension parameter loading crashes ([vllm-project/vllm Issue #51737](https://github.com/vllm-project/vllm/issues/51737)).
+<pre style="background: #450A0A; color: #FCA5A5; border: 1px solid #991B1B; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 13px; line-height: 1.25; overflow-x: auto;">
+<span style="color: #FCA5A5; font-weight: bold;"> ╔═════════════════════════════════════════════════════════════════════════════════════════╗</span>
+<span style="color: #F87171; font-weight: bold;"> ║                                                                                         ║</span>
+<span style="color: #F87171; font-weight: bold;"> ║   ██╗   ██╗██╗     ██╗     ███╗   ███╗   ██████╗ ███████╗███╗   ███╗███╗  ██╗ █████╗  ║</span>
+<span style="color: #F87171; font-weight: bold;"> ║   ██║   ██║██║     ██║     ████╗ ████║  ██╔════╝ ██╔════╝████╗ ████║████╗ ██║██╔══██╗ ║</span>
+<span style="color: #F87171; font-weight: bold;"> ║   ██║   ██║██║     ██║     ██╔████╔██║  ██║  ███╗█████╗  ██╔████╔██║██╔██╗██║███████║ ║</span>
+<span style="color: #F87171; font-weight: bold;"> ║   ╚██╗ ██╔╝██║     ██║     ██║╚██╔╝██║  ██║   ██║██╔══╝  ██║╚██╔╝██║██║╚████║██╔══██║ ║</span>
+<span style="color: #F87171; font-weight: bold;"> ║    ╚████╔╝ ███████╗███████╗██║ ╚═╝ ██║  ╚██████╔╝███████╗██║ ╚═╝ ██║██║ ╚███║██║  ██║ ║</span>
+<span style="color: #F87171; font-weight: bold;"> ║     ╚═══╝  ╚══════╝╚══════╝╚═╝     ╚═╝   ╚═════╝ ╚══════╝╚═╝     ╚═╝╚═╝  ╚══╝╚═╝  ╚═╝ ║</span>
+<span style="color: #FCA5A5;"> ║                                                                                         ║</span>
+<span style="color: #FBBF24; font-weight: bold;"> ║      ───  G E M M A  4  3 1 B  S P E C U L A T I V E  F I X  P A T C H  ───          ║</span>
+<span style="color: #FCA5A5;"> ║                                                                                         ║</span>
+<span style="color: #FCA5A5; font-weight: bold;"> ╠═════════════════════════════════════════════════════════════════════════════════════════╣</span>
+<span style="color: #FCA5A5;"> ║                                                                                         ║</span>
+<span style="color: #F87171; font-weight: bold;"> ║   [PATCH TARGET]           </span><span style="color: #E2E8F0;">Gemma 4 31B FP8 Speculative Decoding & Tensor Parallelism       </span><span style="color: #FCA5A5;">║</span>
+<span style="color: #FCA5A5;"> ║                                                                                         ║</span>
+<span style="color: #F87171; font-weight: bold;"> ║   [VERIFICATION]           </span><span style="color: #FBBF24; font-weight: bold;">Ratified under gemstone.zero-bug-verification/v1               </span><span style="color: #FCA5A5;">║</span>
+<span style="color: #FCA5A5;"> ║                                                                                         ║</span>
+<span style="color: #FCA5A5; font-weight: bold;"> ╚═════════════════════════════════════════════════════════════════════════════════════════╝</span>
+</pre>
 
----
 
 ## 1. Project Overview & Target Issues
 
