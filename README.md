@@ -22,16 +22,28 @@
 </pre>
 
 
-## 1. Project Overview & Target Issues
+## 📑 Table of Contents
+- [🎯 Overview & Target Issues](#-overview--target-issues)
+- [🔍 Root Cause & Technical Mechanics](#-root-cause--technical-mechanics)
+- [🏗️ Code Solutions & Architecture](#-code-solutions--architecture)
+- [⚡ Empirical Infrastructure Benchmarks](#-empirical-infrastructure-benchmarks)
+- [📦 Quick Start & How to Apply](#-quick-start--how-to-apply)
+
+---
+
+## 🎯 Overview & Target Issues
 
 This repository contains critical architectural patches for vLLM to enable stable, high-performance inference for Gemma 4 models (`RedHatAI/gemma-4-31B-it-FP8-dynamic` with `google/gemma-4-31B-it-assistant`).
+
+> [!NOTE]
+> Resolves **[vllm-project/vllm Issue #51737](https://github.com/vllm-project/vllm/issues/51737)**.
 
 * **vLLM Issue #51737**: Fixes the parameter loading crash `RuntimeError: start (0) + length (4096) exceeds dimension size (2048)` caused by heterogeneous QKV head dimensions across layers.
 * **MTP Optimistic Top-K CUDA Graph Fix**: Fixes speculative decoding freeze and performance degradation where top-k index buffer sharing flags were frozen during CUDA Graph capture.
 
 ---
 
-## 2. Root Cause & Technical Mechanics
+## 🔍 Root Cause & Technical Mechanics
 
 The issues stem from two primary architectural frictions:
 
@@ -40,7 +52,7 @@ The issues stem from two primary architectural frictions:
 
 ---
 
-## 3. Code Solutions & Architecture
+## 🏗️ Code Solutions & Architecture
 
 The fixes implemented here move away from ad-hoc patches toward structural memory safety:
 
@@ -50,7 +62,7 @@ The fixes implemented here move away from ad-hoc patches toward structural memor
 
 ---
 
-## 4. Empirical Infrastructure Benchmarks
+## ⚡ Empirical Infrastructure Benchmarks
 
 Benchmarked live on our NVIDIA H200 GPU infrastructure for **Gemma 4 31B with Gemma Assistant Speculator (`google/gemma-4-31B-it-assistant`)**:
 
@@ -61,15 +73,18 @@ Benchmarked live on our NVIDIA H200 GPU infrastructure for **Gemma 4 31B with Ge
 | **Gemma 4 + Assistant Speculator (Unpatched)** | 155.20 tok/s | 68.40 tok/s | Baseline MTP |
 | **Gemma 4 + Assistant Speculator (Our CUDA Graph Fix)** | **190.65 tok/s** | **97.39 tok/s** | **+22.8% to +42.3% Faster** 🚀 |
 
-### Speculative Acceptance & Kernel Overhead
+<details>
+<summary><b>View Speculative Acceptance & Kernel Overhead Details</b></summary>
+
 * **Gemma Assistant Draft Acceptance**: **51.3% Avg Acceptance Rate** across 5 draft tokens
 * **Per-Position Acceptance**: `[0.771, 0.617, 0.479, 0.383, 0.314]`
 * **Mean Acceptance Length**: **3.56 tokens** per speculative step
 * **Assistant Kernel Overhead**: Reduced from **5 logit sorting passes/step** down to **1 pass/step** (80% reduction in top-k logit indexer calls inside CUDA Graphs)
+</details>
 
 ---
 
-## 5. Quick Start & How to Apply
+## 📦 Quick Start & How to Apply
 
 ### Prerequisites
 * vLLM `0.27.0-dev` or `main`
